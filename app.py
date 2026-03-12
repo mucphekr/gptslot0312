@@ -503,7 +503,7 @@ def activate():
     return jsonify(
         {
             "success": True,
-            "invited": invited_payload,
+            "invited": invite_info["invited"],
             "activatedAt": ts,
             "teamId": team_id,
             "teamName": team_name,
