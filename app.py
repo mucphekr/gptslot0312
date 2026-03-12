@@ -204,10 +204,21 @@ def invite_with_failover(auth: str, member_email: str, max_size: int):
     teams_payload = call_teams_api(auth=auth)
     teams_data = (teams_payload.get("data") or {}).get("teams") or []
     team_ids: list[str] = []
+    # Lưu lại meta để có thể in ra tên team cùng với id
+    team_meta: dict[str, dict] = {}
     for t in teams_data:
         tid = str(t.get("id") or t.get("_id") or t.get("teamId") or "").strip()
-        if tid:
-            team_ids.append(tid)
+        if not tid:
+            continue
+        name = str(
+            t.get("name")
+            or t.get("teamName")
+            or t.get("label")
+            or t.get("title")
+            or ""
+        ).strip()
+        team_ids.append(tid)
+        team_meta[tid] = {"name": name}
 
     if not team_ids:
         raise RuntimeError("Không lấy được danh sách teamId từ endpoint /teams.")
@@ -219,14 +230,40 @@ def invite_with_failover(auth: str, member_email: str, max_size: int):
         try:
             cap = assert_team_has_capacity(team_id=team_id, auth=auth, max_size=max_size)
             invited_payload = call_invite_api(team_id=team_id, auth=auth, member_email=member_email)
-            return team_id, cap, invited_payload, tried
+            team_name = (team_meta.get(team_id) or {}).get("name") or ""
+            # danh sách "name(id)" để debug / hiển thị
+            pretty_tried: list[str] = []
+            for tid in tried:
+                meta = team_meta.get(tid) or {}
+                tname = (meta.get("name") or "").strip()
+                if tname:
+                    pretty_tried.append(f"{tname}({tid})")
+                else:
+                    pretty_tried.append(tid)
+            return {
+                "team_id": team_id,
+                "team_name": team_name,
+                "capacity": cap,
+                "invited": invited_payload,
+                "tried_ids": tried,
+                "tried": pretty_tried,
+            }
         except Exception as e:
             last_err = str(e)
             continue
 
     msg = f"Không mời được vào bất kỳ team nào. Lỗi cuối: {last_err}"
     if tried:
-        msg += f" | tried={','.join(tried[:8])}{'...' if len(tried) > 8 else ''}"
+        # thêm tên team cho dễ debug: "TeamName(id)"
+        pretty_tried_err: list[str] = []
+        for tid in tried[:8]:
+            meta = team_meta.get(tid) or {}
+            tname = (meta.get("name") or "").strip()
+            if tname:
+                pretty_tried_err.append(f"{tname}({tid})")
+            else:
+                pretty_tried_err.append(tid)
+        msg += f" | tried={','.join(pretty_tried_err)}{'...' if len(tried) > 8 else ''}"
     raise RuntimeError(msg)
 
 
@@ -392,7 +429,8 @@ def activate():
         return jsonify({"success": False, "error": "Thiếu env MANAGETEAM_AUTH."}), 500
 
     cols = ensure_code_sheet_columns(
-        ws_codes, ["code", "activated_at", "expires_at", "email", "team_id", "status", "error"]
+        ws_codes,
+        ["code", "activated_at", "expires_at", "email", "team_id", "team_name", "status", "error"],
     )
 
     existing_email = str(row.get("email", "")).strip()
@@ -419,7 +457,11 @@ def activate():
 
     try:
         max_size = get_max_team_size()
-        team_id, cap, invited_payload, tried = invite_with_failover(auth=auth, member_email=email, max_size=max_size)
+        invite_info = invite_with_failover(auth=auth, member_email=email, max_size=max_size)
+        team_id = invite_info["team_id"]
+        team_name = invite_info.get("team_name", "") or ""
+        cap = invite_info["capacity"]
+        tried = invite_info.get("tried_ids") or []
 
         ws_acts.append_row([ts, code, email, team_id], value_input_option="RAW")
         # Bind activation info on first activation.
@@ -435,10 +477,12 @@ def activate():
 
         ws_codes.update_cell(row_idx, cols["email"], email)
         ws_codes.update_cell(row_idx, cols["team_id"], team_id)
+        if "team_name" in cols:
+            ws_codes.update_cell(row_idx, cols["team_name"], team_name)
         ws_codes.update_cell(
             row_idx,
             cols["status"],
-            f"invited (total={cap['total']}, tried={len(tried)})",
+            f"invited to {team_name or team_id} (total={cap['total']}, tried={len(tried)})",
         )
         ws_codes.update_cell(row_idx, cols["error"], "")
     except Exception as e:
@@ -455,7 +499,17 @@ def activate():
 
     maybe_send_smtp_email(to_email=email, activation_code=code)
 
-    return jsonify({"success": True, "invited": invited_payload, "activatedAt": ts})
+    # Bổ sung thông tin team để client / log có thể xem được tên + id
+    return jsonify(
+        {
+            "success": True,
+            "invited": invited_payload,
+            "activatedAt": ts,
+            "teamId": team_id,
+            "teamName": team_name,
+            "teamTried": invite_info.get("tried"),
+        }
+    )
 
 
 if __name__ == "__main__":
