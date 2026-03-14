@@ -8,6 +8,8 @@ import time
 
 import requests
 from requests.exceptions import RequestException, Timeout, ConnectionError, SSLError
+import ssl
+import socket
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 import gspread
@@ -115,6 +117,8 @@ def _request_with_cloudflare_retry(method: str, url: str, timeout: int = 30, ret
     Thực hiện HTTP request với retry khi:
     - Bị Cloudflare trả về trang "Just a moment..." (HTTP 403 + HTML challenge)
     - Gặp lỗi kết nối (ConnectionError, SSLError, Timeout)
+    - Gặp lỗi khi đọc response body (SSL errors, socket errors)
+    - Gặp lỗi ở mức thấp khi đọc status line hoặc response headers
 
     Điều này giúp giảm các lỗi lặt vặt do Cloudflare thỉnh thoảng bật
     challenge ngẫu nhiên hoặc các lỗi mạng tạm thời.
@@ -122,33 +126,67 @@ def _request_with_cloudflare_retry(method: str, url: str, timeout: int = 30, ret
     last_exception = None
     last_resp = None
     
-    for attempt in range(retries):
-        try:
-            resp = requests.request(method=method, url=url, timeout=timeout)
-            last_resp = resp
-            
-            # Nếu không phải 403, hoặc nội dung không giống trang challenge,
-            # trả về luôn (để logic cũ xử lý).
-            text = resp.text or ""
-            if resp.status_code != 403 or "Just a moment" not in text:
-                return resp
-            
-            # Nếu là 403 kiểu Cloudflare challenge và vẫn còn lượt retry,
-            # đợi một chút rồi thử lại.
-            if attempt < retries - 1:
-                time.sleep(backoff)
-                backoff *= 2
-                continue
+    # Sử dụng session để kiểm soát connection tốt hơn
+    session = requests.Session()
+    # Tắt connection pooling để tránh reuse connection bị lỗi
+    session.mount('http://', requests.adapters.HTTPAdapter(pool_connections=1, pool_maxsize=1, max_retries=0))
+    session.mount('https://', requests.adapters.HTTPAdapter(pool_connections=1, pool_maxsize=1, max_retries=0))
+    
+    try:
+        for attempt in range(retries):
+            try:
+                # Sử dụng stream=True để kiểm soát tốt hơn việc đọc response
+                resp = session.request(method=method, url=url, timeout=timeout, stream=True)
+                last_resp = resp
                 
-        except (ConnectionError, SSLError, Timeout, RequestException) as e:
-            last_exception = e
-            # Nếu vẫn còn lượt retry, đợi một chút rồi thử lại
-            if attempt < retries - 1:
-                time.sleep(backoff)
-                backoff *= 2
-                continue
-            # Nếu hết lượt retry, raise exception cuối cùng
-            raise
+                # Đọc response body có thể gây ra lỗi SSL/socket
+                # nếu connection bị đóng trong lúc đọc
+                try:
+                    text = resp.text or ""
+                except (SSLError, ConnectionError, socket.error, ssl.SSLError, OSError, Exception) as read_err:
+                    # Nếu lỗi khi đọc response body, coi như request failed và retry
+                    last_exception = read_err
+                    # Đóng response để cleanup
+                    try:
+                        resp.close()
+                    except:
+                        pass
+                    if attempt < retries - 1:
+                        time.sleep(backoff)
+                        backoff *= 2
+                        continue
+                    raise
+                
+                # Nếu không phải 403, hoặc nội dung không giống trang challenge,
+                # trả về luôn (để logic cũ xử lý).
+                if resp.status_code != 403 or "Just a moment" not in text:
+                    return resp
+                
+                # Nếu là 403 kiểu Cloudflare challenge và vẫn còn lượt retry,
+                # đợi một chút rồi thử lại.
+                if attempt < retries - 1:
+                    time.sleep(backoff)
+                    backoff *= 2
+                    continue
+                    
+            except (ConnectionError, SSLError, Timeout, RequestException, socket.error, ssl.SSLError, OSError, Exception) as e:
+                # Bỏ qua SystemExit và KeyboardInterrupt để không chặn shutdown
+                if isinstance(e, (SystemExit, KeyboardInterrupt)):
+                    raise
+                last_exception = e
+                # Nếu vẫn còn lượt retry, đợi một chút rồi thử lại
+                if attempt < retries - 1:
+                    time.sleep(backoff)
+                    backoff *= 2
+                    continue
+                # Nếu hết lượt retry, raise exception cuối cùng
+                raise
+    finally:
+        # Đóng session để cleanup connections
+        try:
+            session.close()
+        except:
+            pass
     
     # Nếu có response cuối cùng (dù là 403), trả về nó
     if last_resp is not None:
@@ -169,7 +207,11 @@ def call_list_api(team_id: str, auth: str):
     try:
         data = resp.json()
     except Exception:
-        data = {"success": False, "error": resp.text}
+        try:
+            error_text = resp.text
+        except (SSLError, ConnectionError, socket.error, ssl.SSLError, OSError):
+            error_text = f"Failed to read response body (status={resp.status_code})"
+        data = {"success": False, "error": error_text}
 
     if resp.status_code >= 400 or not data.get("success", False):
         code = data.get("code") or f"HTTP_{resp.status_code}"
@@ -186,7 +228,11 @@ def call_teams_api(auth: str):
     try:
         data = resp.json()
     except Exception:
-        data = {"success": False, "error": resp.text}
+        try:
+            error_text = resp.text
+        except (SSLError, ConnectionError, socket.error, ssl.SSLError, OSError):
+            error_text = f"Failed to read response body (status={resp.status_code})"
+        data = {"success": False, "error": error_text}
 
     if resp.status_code >= 400 or not data.get("success", False):
         code = data.get("code") or f"HTTP_{resp.status_code}"
@@ -203,7 +249,11 @@ def call_invite_api(team_id: str, auth: str, member_email: str):
     try:
         data = resp.json()
     except Exception:
-        data = {"success": False, "error": resp.text}
+        try:
+            error_text = resp.text
+        except (SSLError, ConnectionError, socket.error, ssl.SSLError, OSError):
+            error_text = f"Failed to read response body (status={resp.status_code})"
+        data = {"success": False, "error": error_text}
 
     if resp.status_code >= 400 or not data.get("success", False):
         code = data.get("code") or f"HTTP_{resp.status_code}"
