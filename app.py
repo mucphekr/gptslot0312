@@ -10,6 +10,7 @@ import requests
 from requests.exceptions import RequestException, Timeout, ConnectionError, SSLError
 import ssl
 import socket
+import cloudscraper
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 import gspread
@@ -120,8 +121,8 @@ def _request_with_cloudflare_retry(method: str, url: str, timeout: int = 30, ret
     - Gặp lỗi khi đọc response body (SSL errors, socket errors)
     - Gặp lỗi ở mức thấp khi đọc status line hoặc response headers
 
-    Điều này giúp giảm các lỗi lặt vặt do Cloudflare thỉnh thoảng bật
-    challenge ngẫu nhiên hoặc các lỗi mạng tạm thời.
+    Sử dụng cloudscraper để tự động vượt qua Cloudflare challenge.
+    Cloudscraper mô phỏng browser behavior và có thể giải quyết JavaScript challenge.
     
     Sử dụng tuple timeout (connect_timeout, read_timeout) để phát hiện
     lỗi kết nối nhanh hơn và tránh hang quá lâu.
@@ -139,18 +140,21 @@ def _request_with_cloudflare_retry(method: str, url: str, timeout: int = 30, ret
     else:
         timeout_tuple = timeout
     
-    # Sử dụng session để kiểm soát connection tốt hơn
-    session = requests.Session()
-    # Tắt connection pooling để tránh reuse connection bị lỗi
-    session.mount('http://', requests.adapters.HTTPAdapter(pool_connections=1, pool_maxsize=1, max_retries=0))
-    session.mount('https://', requests.adapters.HTTPAdapter(pool_connections=1, pool_maxsize=1, max_retries=0))
+    # Sử dụng cloudscraper để vượt qua Cloudflare challenge
+    # cloudscraper tự động xử lý JavaScript challenge và browser fingerprinting
+    scraper = cloudscraper.create_scraper(
+        browser={
+            'browser': 'chrome',
+            'platform': 'windows',
+            'desktop': True
+        }
+    )
     
     try:
         for attempt in range(retries):
             try:
-                # Sử dụng stream=True để kiểm soát tốt hơn việc đọc response
-                # Sử dụng tuple timeout để phát hiện lỗi kết nối nhanh hơn
-                resp = session.request(method=method, url=url, timeout=timeout_tuple, stream=True)
+                # Cloudscraper tự động xử lý Cloudflare challenge
+                resp = scraper.request(method=method, url=url, timeout=timeout_tuple)
                 last_resp = resp
                 
                 # Đọc response body có thể gây ra lỗi SSL/socket
@@ -171,17 +175,17 @@ def _request_with_cloudflare_retry(method: str, url: str, timeout: int = 30, ret
                         continue
                     raise
                 
-                # Nếu không phải 403, hoặc nội dung không giống trang challenge,
-                # trả về luôn (để logic cũ xử lý).
-                if resp.status_code != 403 or "Just a moment" not in text:
-                    return resp
+                # Kiểm tra xem có phải Cloudflare challenge không
+                # (mặc dù cloudscraper đã xử lý, nhưng vẫn kiểm tra để an toàn)
+                if resp.status_code == 403 and "Just a moment" in text:
+                    # Nếu vẫn là challenge và vẫn còn lượt retry, đợi một chút rồi thử lại
+                    if attempt < retries - 1:
+                        time.sleep(backoff)
+                        backoff *= 2
+                        continue
                 
-                # Nếu là 403 kiểu Cloudflare challenge và vẫn còn lượt retry,
-                # đợi một chút rồi thử lại.
-                if attempt < retries - 1:
-                    time.sleep(backoff)
-                    backoff *= 2
-                    continue
+                # Nếu không phải challenge hoặc đã vượt qua, trả về response
+                return resp
                     
             except (ConnectionError, SSLError, Timeout, RequestException, socket.error, ssl.SSLError, OSError, Exception) as e:
                 # Bỏ qua SystemExit và KeyboardInterrupt để không chặn shutdown
@@ -196,9 +200,9 @@ def _request_with_cloudflare_retry(method: str, url: str, timeout: int = 30, ret
                 # Nếu hết lượt retry, raise exception cuối cùng
                 raise
     finally:
-        # Đóng session để cleanup connections
+        # Cleanup scraper session
         try:
-            session.close()
+            scraper.close()
         except:
             pass
     
