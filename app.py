@@ -667,6 +667,40 @@ def maybe_send_smtp_email(to_email: str, activation_code: str):
         smtp.send_message(msg)
 
 
+def notify_telegram(email: str, code: str, team_name: str | None = None, success: bool = True, error: str | None = None):
+    """
+    Gửi thông báo về bot Telegram khi có yêu cầu kích hoạt.
+    Gửi cả khi thành công lẫn thất bại (tuỳ tham số success).
+    Không để lỗi Telegram làm hỏng luồng chính.
+    """
+    token = (os.getenv("TELEGRAM_BOT_TOKEN", "") or "").strip()
+    # Cho phép override qua env, nếu không thì dùng ID user mặc định của bạn.
+    chat_id = (os.getenv("TELEGRAM_CHAT_ID", "7880944832") or "").strip()
+    if not token or not chat_id:
+        return
+
+    status = "SUCCESS" if success else "FAILED"
+    lines = [
+        f"[{status}] GPT Plus invite",
+        f"- Email: {email}",
+        f"- Code: {code}",
+    ]
+    if team_name:
+        lines.append(f"- Team: {team_name}")
+    if error:
+        lines.append(f"- Error: {error}")
+    text = "\n".join(lines)
+
+    try:
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = {"chat_id": chat_id, "text": text}
+        # Timeout ngắn, không chặn request chính.
+        requests.post(url, json=payload, timeout=5)
+    except Exception:
+        # Nuốt lỗi để không ảnh hưởng tới user.
+        pass
+
+
 app = Flask(__name__)
 
 
@@ -775,9 +809,13 @@ def activate():
         ws_codes.update_cell(row_idx, cols["email"], email)
         ws_codes.update_cell(row_idx, cols["status"], "failed")
         ws_codes.update_cell(row_idx, cols["error"], str(e))
+        # Thông báo thất bại lên Telegram
+        notify_telegram(email=email, code=code, team_name=None, success=False, error=str(e))
         return jsonify({"success": False, "error": str(e)}), 500
 
     maybe_send_smtp_email(to_email=email, activation_code=code)
+    # Thông báo thành công lên Telegram
+    notify_telegram(email=email, code=code, team_name=team_name, success=True, error=None)
 
     # Bổ sung thông tin team để client / log có thể xem được tên + id
     return jsonify(
