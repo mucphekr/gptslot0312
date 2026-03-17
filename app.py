@@ -121,8 +121,9 @@ def _api_request(
 ):
     """
     Wrapper gọi External API v1/v2 sử dụng Bearer token mcg_...
+    Dùng _request_with_cloudflare_retry để vượt qua trang Cloudflare "Just a moment..."
+    nếu có.
     """
-    import requests
 
     base = os.getenv("MANAGETEAM_BASE_URL", "http://localhost:3001").rstrip("/")
     token = (auth_token or "").strip()
@@ -136,7 +137,9 @@ def _api_request(
         "Content-Type": "application/json",
     }
 
-    resp = requests.request(method=method.upper(), url=url, headers=headers, timeout=timeout)
+    # _request_with_cloudflare_retry sẽ gắn timeout hợp lý và retry khi gặp
+    # challenge "Just a moment..." hoặc lỗi mạng tạm thời.
+    resp = _request_with_cloudflare_retry(method.upper(), url, timeout=timeout, retries=3)
     try:
         data = resp.json()
     except Exception:
