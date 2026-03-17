@@ -108,8 +108,8 @@ def normalize_auth(auth: str):
     Giữ lại hàm này cho tương thích nhưng không còn dùng kiểu auth cũ nữa.
     Hệ thống mới dùng Bearer token (mcg_...) và path chuẩn /api/v1, /api/v2.
     """
-    # VD: https://kendev.id.vn  hoặc http://localhost:3001
-    base = os.getenv("MANAGETEAM_BASE_URL", "http://localhost:3001").rstrip("/")
+    # VD: http://kendev.id.vn  hoặc http://localhost:3001
+    base = os.getenv("MANAGETEAM_BASE_URL", "http://kendev.id.vn").rstrip("/")
     return base, auth.strip()
 
 
@@ -126,7 +126,7 @@ def _api_request(
     nếu có.
     """
 
-    base = os.getenv("MANAGETEAM_BASE_URL", "http://localhost:3001").rstrip("/")
+    base = os.getenv("MANAGETEAM_BASE_URL", "http://kendev.id.vn").rstrip("/")
     token = (auth_token or "").strip()
     if not token:
         raise RuntimeError("Thiếu MANAGETEAM_AUTH (Bearer mcg_...).")
