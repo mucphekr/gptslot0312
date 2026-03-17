@@ -259,7 +259,7 @@ def _request_with_cloudflare_retry(method: str, url: str, timeout: int = 30, ret
 def call_list_api(team_id: str, auth: str):
     """
     Hàm cũ không còn được dùng; giữ lại để tránh lỗi import.
-    Đối với API mới, dùng _get_team_capacity thay thế.
+    Đối với API mới, dùng _api_request và assert_team_has_capacity thay thế.
     """
     raise RuntimeError("call_list_api không còn được hỗ trợ với API mới.")
 
@@ -489,7 +489,6 @@ def assert_team_has_capacity(team_id: str, auth: str, max_size: int) -> dict:
 
     members = list(members_list)
     pending = list(invites_list)
-
     total = len(members) + len(pending)
     if total >= max_size:
         raise RuntimeError(
