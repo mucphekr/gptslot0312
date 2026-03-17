@@ -145,9 +145,25 @@ def _api_request(
         url,
         headers=headers,
         json_body=json_body,
+        allow_redirects=False,
         timeout=timeout,
         retries=3,
     )
+    # Một số server (hoặc Cloudflare) có thể redirect http -> https.
+    # requests/clouscraper khi redirect POST có thể bị đổi thành GET /.
+    # Vì vậy ta tự xử lý redirect để giữ nguyên method/path.
+    if resp is not None and resp.status_code in {301, 302, 307, 308}:
+        loc = (resp.headers.get("Location") or "").strip()
+        if loc:
+            resp = _request_with_cloudflare_retry(
+                method.upper(),
+                loc,
+                headers=headers,
+                json_body=json_body,
+                allow_redirects=False,
+                timeout=timeout,
+                retries=2,
+            )
     try:
         data = resp.json()
     except Exception:
@@ -168,6 +184,7 @@ def _request_with_cloudflare_retry(
     url: str,
     headers: dict | None = None,
     json_body: dict | None = None,
+    allow_redirects: bool = True,
     timeout: int = 30,
     retries: int = 3,
     backoff: float = 1.5,
@@ -217,6 +234,7 @@ def _request_with_cloudflare_retry(
                     url=url,
                     headers=headers,
                     json=json_body,
+                    allow_redirects=allow_redirects,
                     timeout=timeout_tuple,
                 )
                 last_resp = resp
@@ -378,10 +396,26 @@ def invite_with_failover(auth: str, member_email: str, max_size: int):
             or t.get("teamName")
             or t.get("label")
             or t.get("title")
+            or t.get("displayName")
             or ""
         ).strip()
+        # API v1 trả sẵn membersCount + invitesCount, dùng để kiểm tra slot
+        # tránh phải gọi thêm các route members/invites (dễ sai base/path).
+        try:
+            members_count = int(t.get("membersCount") or 0)
+        except Exception:
+            members_count = 0
+        try:
+            invites_count = int(t.get("invitesCount") or 0)
+        except Exception:
+            invites_count = 0
         team_ids.append(tid)
-        team_meta[tid] = {"name": name}
+        team_meta[tid] = {
+            "name": name,
+            "membersCount": members_count,
+            "invitesCount": invites_count,
+            "total": members_count + invites_count,
+        }
 
     if not team_ids:
         raise RuntimeError("Không lấy được danh sách teamId từ endpoint /teams.")
@@ -391,7 +425,14 @@ def invite_with_failover(auth: str, member_email: str, max_size: int):
     for team_id in team_ids:
         tried.append(team_id)
         try:
-            cap = assert_team_has_capacity(team_id=team_id, auth=auth, max_size=max_size)
+            meta = team_meta.get(team_id) or {}
+            total = int(meta.get("total") or 0)
+            members_count = int(meta.get("membersCount") or 0)
+            invites_count = int(meta.get("invitesCount") or 0)
+            cap = {"members": members_count, "pendingInvites": invites_count, "total": total}
+            if total >= max_size:
+                # team đầy, thử team tiếp theo
+                continue
             invited_payload = call_invite_api(team_id=team_id, auth=auth, member_email=member_email)
             # Sau khi invite thành công thì trigger sync cho team đó.
             # POST {BASE}/api/v2/teams/:id/sync
