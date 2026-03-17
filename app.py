@@ -334,6 +334,13 @@ def call_invite_api(team_id: str, auth: str, member_email: str):
     )
 
 
+def call_team_invites_api(team_id: str, auth: str):
+    """
+    GET /api/v2/teams/:id/invites
+    """
+    return _api_request("GET", f"/api/v2/teams/{team_id}/invites", auth_token=auth, timeout=30)
+
+
 def pick_team_with_capacity(auth: str, max_size: int = 5):
     teams_payload = call_teams_api(auth=auth)
     teams_data = (teams_payload.get("data") or {}).get("teams") or []
@@ -437,6 +444,50 @@ def invite_with_failover(auth: str, member_email: str, max_size: int):
             # Sau khi invite thành công thì trigger sync cho team đó.
             # POST {BASE}/api/v2/teams/:id/sync
             sync_payload = _api_request("POST", f"/api/v2/teams/{team_id}/sync", auth_token=auth, timeout=60)
+
+            # Xác thực: invite có thật sự được tạo hay không.
+            # Một số trường hợp API trả ok:true nhưng không tạo invite (account_invites rỗng).
+            result = (invited_payload or {}).get("result") if isinstance(invited_payload, dict) else None
+            account_invites = (result or {}).get("account_invites") if isinstance(result, dict) else None
+            errored_emails = (result or {}).get("errored_emails") if isinstance(result, dict) else None
+            if isinstance(errored_emails, list) and any(str(e).lower() == member_email.lower() for e in errored_emails):
+                raise RuntimeError(f"INVITE_FAILED: errored_emails={errored_emails}")
+
+            invited_ok = False
+            if isinstance(account_invites, list):
+                for inv in account_invites:
+                    if isinstance(inv, dict):
+                        em = str(inv.get("email") or inv.get("memberEmail") or "").strip().lower()
+                        if em and em == member_email.lower():
+                            invited_ok = True
+                            break
+                    elif isinstance(inv, str) and inv.strip().lower() == member_email.lower():
+                        invited_ok = True
+                        break
+
+            if not invited_ok:
+                # Fallback: query invites snapshot
+                invites_snapshot = call_team_invites_api(team_id=team_id, auth=auth)
+                invites_data = (invites_snapshot.get("data") or {}) if isinstance(invites_snapshot, dict) else {}
+                invites_list = invites_data.get("invites") if isinstance(invites_data, dict) else None
+                if invites_list is None:
+                    invites_list = invites_snapshot.get("data") if isinstance(invites_snapshot, dict) else None
+                found = False
+                if isinstance(invites_list, list):
+                    for inv in invites_list:
+                        if isinstance(inv, dict):
+                            em = str(inv.get("email") or inv.get("memberEmail") or "").strip().lower()
+                            if em == member_email.lower():
+                                found = True
+                                break
+                        elif isinstance(inv, str) and inv.strip().lower() == member_email.lower():
+                            found = True
+                            break
+                if not found:
+                    raise RuntimeError(
+                        "INVITE_NOT_CREATED: API returned ok but no pending invite found. "
+                        "Possible causes: email already a member, invalid email, missing upstream credential, or provider didn't create invite."
+                    )
             team_name = (team_meta.get(team_id) or {}).get("name") or ""
             # danh sách "name(id)" để debug / hiển thị
             pretty_tried: list[str] = []

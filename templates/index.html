@@ -186,7 +186,7 @@
         });
         const data = await res.json().catch(() => ({}));
         if (res.ok && data.success) {
-          showMessage('초대장을 지피티 이메일로 발송해 드렸습니다.\n이메일함(스팸,중요 이메일함까지) 확인 후 수락해 주시면 바로 이용 가능합니다.\n저희 구독핀을 찾아주셔서 정말 감사합니다.', false);
+          showMessage('처리가 완료되었습니다.\n초대 메일은 서비스 정책/설정에 따라 발송되지 않을 수 있습니다.\nTeam의 Invite(초대) 목록에서도 확인해 주세요.', false);
           form.reset();
         } else {
           showMessage(data.error || ('오류: ' + res.status), true);
