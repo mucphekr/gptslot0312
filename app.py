@@ -118,6 +118,7 @@ def _api_request(
     path: str,
     auth_token: str,
     timeout: int = 20,
+    json_body: dict | None = None,
 ):
     """
     Wrapper gọi External API v1/v2 sử dụng Bearer token mcg_...
@@ -139,7 +140,14 @@ def _api_request(
 
     # _request_with_cloudflare_retry sẽ gắn timeout hợp lý và retry khi gặp
     # challenge "Just a moment..." hoặc lỗi mạng tạm thời.
-    resp = _request_with_cloudflare_retry(method.upper(), url, timeout=timeout, retries=3)
+    resp = _request_with_cloudflare_retry(
+        method.upper(),
+        url,
+        headers=headers,
+        json_body=json_body,
+        timeout=timeout,
+        retries=3,
+    )
     try:
         data = resp.json()
     except Exception:
@@ -155,7 +163,15 @@ def _api_request(
     return data
 
 
-def _request_with_cloudflare_retry(method: str, url: str, timeout: int = 30, retries: int = 3, backoff: float = 1.5):
+def _request_with_cloudflare_retry(
+    method: str,
+    url: str,
+    headers: dict | None = None,
+    json_body: dict | None = None,
+    timeout: int = 30,
+    retries: int = 3,
+    backoff: float = 1.5,
+):
     """
     Thực hiện HTTP request với retry khi:
     - Bị Cloudflare trả về trang "Just a moment..." (HTTP 403 + HTML challenge)
@@ -196,7 +212,13 @@ def _request_with_cloudflare_retry(method: str, url: str, timeout: int = 30, ret
         for attempt in range(retries):
             try:
                 # Cloudscraper tự động xử lý Cloudflare challenge
-                resp = scraper.request(method=method, url=url, timeout=timeout_tuple)
+                resp = scraper.request(
+                    method=method,
+                    url=url,
+                    headers=headers,
+                    json=json_body,
+                    timeout=timeout_tuple,
+                )
                 last_resp = resp
                 
                 # Đọc response body có thể gây ra lỗi SSL/socket
@@ -285,7 +307,13 @@ def call_invite_api(team_id: str, auth: str, member_email: str):
     """
     body = {"email": member_email, "role": "standard-user"}
     # POST {BASE}/api/v2/teams/:id/members/invite
-    return _api_request("POST", f"/api/v2/teams/{team_id}/members/invite", auth_token=auth, timeout=30)
+    return _api_request(
+        "POST",
+        f"/api/v2/teams/{team_id}/members/invite",
+        auth_token=auth,
+        json_body=body,
+        timeout=30,
+    )
 
 
 def pick_team_with_capacity(auth: str, max_size: int = 5):
