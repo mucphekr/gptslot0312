@@ -233,7 +233,7 @@ def _request_with_cloudflare_retry(
     )
     
     try:
-        for attempt in range(retries):
+        for attempt in range(max(1, retries)):
             try:
                 # Cloudscraper tự động xử lý Cloudflare challenge
                 resp = scraper.request(
@@ -321,7 +321,8 @@ def call_teams_api(auth: str):
       GET {BASE}/api/v1/teams
     Trong đó BASE là `https://kendev.id.vn` hoặc `http://localhost:3001`.
     """
-    return _api_request("GET", "/api/v1/teams", auth_token=auth)
+    # Timeout ngắn (6s) để tránh vượt quá worker timeout của Gunicorn/Railway.
+    return _api_request("GET", "/api/v1/teams", auth_token=auth, timeout=6)
 
 
 def call_invite_api(team_id: str, auth: str, member_email: str):
@@ -332,12 +333,13 @@ def call_invite_api(team_id: str, auth: str, member_email: str):
     """
     body = {"email": member_email, "role": "standard-user"}
     # POST {BASE}/api/v2/teams/:id/members/invite
+    # Dùng timeout ngắn (6s) để tránh worker timeout; nếu API chậm sẽ báo lỗi sớm.
     return _api_request(
         "POST",
         f"/api/v2/teams/{team_id}/members/invite",
         auth_token=auth,
         json_body=body,
-        timeout=30,
+        timeout=6,
     )
 
 
