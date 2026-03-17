@@ -5,6 +5,7 @@ from calendar import monthrange
 from email.message import EmailMessage
 import smtplib
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 from requests.exceptions import RequestException, Timeout, ConnectionError, SSLError
@@ -18,6 +19,9 @@ from google.oauth2.service_account import Credentials
 
 
 load_dotenv()
+
+# Background executor (for sync + sheet updates) to avoid Railway/Gunicorn timeouts.
+_bg_executor = ThreadPoolExecutor(max_workers=int(os.getenv("BG_WORKERS", "4") or "4"))
 
 
 def utc_now_iso() -> str:
@@ -444,9 +448,6 @@ def invite_with_failover(auth: str, member_email: str, max_size: int):
                 # team đầy, thử team tiếp theo
                 continue
             invited_payload = call_invite_api(team_id=team_id, auth=auth, member_email=member_email)
-            # Sau khi invite thành công thì trigger sync cho team đó.
-            # POST {BASE}/api/v2/teams/:id/sync
-            sync_payload = _api_request("POST", f"/api/v2/teams/{team_id}/sync", auth_token=auth, timeout=60)
 
             # Xác thực: invite có thật sự được tạo hay không.
             # Một số trường hợp API trả ok:true nhưng không tạo invite (account_invites rỗng).
@@ -506,7 +507,6 @@ def invite_with_failover(auth: str, member_email: str, max_size: int):
                 "team_name": team_name,
                 "capacity": cap,
                 "invited": invited_payload,
-                "sync": sync_payload,
                 "tried_ids": tried,
                 "tried": pretty_tried,
             }
@@ -527,6 +527,30 @@ def invite_with_failover(auth: str, member_email: str, max_size: int):
                 pretty_tried_err.append(tid)
         msg += f" | tried={','.join(pretty_tried_err)}{'...' if len(tried) > 8 else ''}"
     raise RuntimeError(msg)
+
+
+def _background_sync_and_sheet_update(*, auth: str, code: str, email: str, team_id: str, row_idx: int, cols: dict):
+    """
+    Run sync in background and update code sheet with result.
+    Must not raise (background task).
+    """
+    try:
+        sync_payload = _api_request("POST", f"/api/v2/teams/{team_id}/sync", auth_token=auth, timeout=60)
+        ws_codes, _ = open_worksheets()
+        ws_codes.update_cell(row_idx, cols["status"], f"synced (team={team_id})")
+        if "error" in cols:
+            ws_codes.update_cell(row_idx, cols["error"], "")
+        # Store sync payload if a column exists (optional, not required).
+        return sync_payload
+    except Exception as e:
+        try:
+            ws_codes, _ = open_worksheets()
+            ws_codes.update_cell(row_idx, cols["status"], "sync_failed")
+            if "error" in cols:
+                ws_codes.update_cell(row_idx, cols["error"], f"sync_failed: {e}")
+        except Exception:
+            pass
+        return None
 
 
 def ensure_code_sheet_columns(ws_codes, required_headers: list[str]):
@@ -749,6 +773,17 @@ def activate():
             f"invited to {team_name or team_id} (total={cap['total']}, tried={len(tried)})",
         )
         ws_codes.update_cell(row_idx, cols["error"], "")
+
+        # Trigger sync in background to avoid Railway/Gunicorn request timeout.
+        _bg_executor.submit(
+            _background_sync_and_sheet_update,
+            auth=auth,
+            code=code,
+            email=email,
+            team_id=team_id,
+            row_idx=row_idx,
+            cols=cols,
+        )
     except Exception as e:
         # If first activation attempt, bind email/time (so code can't be stolen later)
         if not activated_dt:
@@ -772,6 +807,7 @@ def activate():
             "teamId": team_id,
             "teamName": team_name,
             "teamTried": invite_info.get("tried"),
+            "sync": {"queued": True},
         }
     )
 
