@@ -153,8 +153,11 @@ def _api_request(
     # requests/clouscraper khi redirect POST có thể bị đổi thành GET /.
     # Vì vậy ta tự xử lý redirect để giữ nguyên method/path.
     if resp is not None and resp.status_code in {301, 302, 307, 308}:
+        from urllib.parse import urljoin
+
         loc = (resp.headers.get("Location") or "").strip()
         if loc:
+            loc = urljoin(url, loc)
             resp = _request_with_cloudflare_retry(
                 method.upper(),
                 loc,
@@ -270,9 +273,9 @@ def _request_with_cloudflare_retry(
                 return resp
                     
             except (ConnectionError, SSLError, Timeout, RequestException, socket.error, ssl.SSLError, OSError, Exception) as e:
-                # Bỏ qua SystemExit và KeyboardInterrupt để không chặn shutdown
-                if isinstance(e, (SystemExit, KeyboardInterrupt)):
-                    raise
+                # Không propagate SystemExit trong web worker (có thể làm Gunicorn worker exit).
+                if isinstance(e, SystemExit):
+                    e = RuntimeError(f"SystemExit intercepted during HTTP call: {e}")
                 last_exception = e
                 # Nếu vẫn còn lượt retry, đợi một chút rồi thử lại
                 if attempt < retries - 1:
