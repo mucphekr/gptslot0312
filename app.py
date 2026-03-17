@@ -266,9 +266,12 @@ def call_list_api(team_id: str, auth: str):
 
 def call_teams_api(auth: str):
     """
-    Lấy danh sách team từ endpoint /api/v1/teams (External API).
+    Lấy danh sách team từ endpoint v1:
+      GET {BASE}/v1/teams
+    Trong đó BASE nên là `https://kendev.id.vn/api` hoặc `http://localhost:3001/api`
+    đúng như ví dụ trong tài liệu, nên path ở đây KHÔNG thêm `/api` nữa.
     """
-    return _api_request("GET", "/api/v1/teams", auth_token=auth)
+    return _api_request("GET", "/v1/teams", auth_token=auth)
 
 
 def call_invite_api(team_id: str, auth: str, member_email: str):
@@ -278,7 +281,7 @@ def call_invite_api(team_id: str, auth: str, member_email: str):
     Body tối thiểu: { "email": ..., "role": "standard-user" }.
     """
     body = {"email": member_email, "role": "standard-user"}
-    return _api_request("POST", f"/api/v2/teams/{team_id}/members/invite", auth_token=auth, timeout=30)
+    return _api_request("POST", f"/v2/teams/{team_id}/members/invite", auth_token=auth, timeout=30)
 
 
 def pick_team_with_capacity(auth: str, max_size: int = 5):
@@ -359,7 +362,7 @@ def invite_with_failover(auth: str, member_email: str, max_size: int):
             cap = assert_team_has_capacity(team_id=team_id, auth=auth, max_size=max_size)
             invited_payload = call_invite_api(team_id=team_id, auth=auth, member_email=member_email)
             # Sau khi invite thành công thì trigger sync cho team đó.
-            sync_payload = _api_request("POST", f"/api/v2/teams/{team_id}/sync", auth_token=auth, timeout=60)
+            sync_payload = _api_request("POST", f"/v2/teams/{team_id}/sync", auth_token=auth, timeout=60)
             team_name = (team_meta.get(team_id) or {}).get("name") or ""
             # danh sách "name(id)" để debug / hiển thị
             pretty_tried: list[str] = []
@@ -477,12 +480,12 @@ def get_max_team_size() -> int:
 def assert_team_has_capacity(team_id: str, auth: str, max_size: int) -> dict:
     """
     Kiểm tra capacity của team dựa trên snapshot:
-      - GET /api/v1/teams/:id/members
-      - GET /api/v1/teams/:id/invites
+      - GET {BASE}/v1/teams/:id/members
+      - GET {BASE}/v1/teams/:id/invites
     Tổng = số member hiện tại + số pending invites.
     """
-    members_payload = _api_request("GET", f"/api/v1/teams/{team_id}/members", auth_token=auth)
-    invites_payload = _api_request("GET", f"/api/v1/teams/{team_id}/invites", auth_token=auth)
+    members_payload = _api_request("GET", f"/v1/teams/{team_id}/members", auth_token=auth)
+    invites_payload = _api_request("GET", f"/v1/teams/{team_id}/invites", auth_token=auth)
 
     members_list = (members_payload.get("data") or {}).get("members") or members_payload.get("data") or []
     invites_list = (invites_payload.get("data") or {}).get("invites") or invites_payload.get("data") or []
