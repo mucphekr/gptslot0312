@@ -449,7 +449,12 @@ def invite_with_failover(auth: str, member_email: str, max_size: int):
             if total >= max_size:
                 # team đầy, thử team tiếp theo
                 continue
-            invited_payload = call_invite_api(team_id=team_id, auth=auth, member_email=member_email)
+
+            # Gọi invite nhiều lần tuỳ theo cấu hình INVITE_RETRIES (mặc định 1).
+            invited_payload = None
+            retries = get_invite_retries()
+            for _ in range(retries):
+                invited_payload = call_invite_api(team_id=team_id, auth=auth, member_email=member_email)
             # Không kiểm tra lại pending invites nữa. Nếu API trả ok:true thì coi như
             # đã gửi lời mời (email sẽ do hệ thống upstream xử lý). Điều này tránh
             # tình trạng đã gửi 1-2 email nhưng vẫn báo lỗi vì snapshot chưa cập nhật.
@@ -588,6 +593,21 @@ def get_max_team_size() -> int:
         return v if v > 0 else 5
     except Exception:
         return 5
+
+
+def get_invite_retries() -> int:
+    """
+    Số lần thử gọi invite cho cùng một email trong một lần kích hoạt.
+    Dùng để tăng khả năng gửi thư trong trường hợp upstream không ổn định.
+    """
+    raw = (os.getenv("INVITE_RETRIES", "") or "").strip()
+    if not raw:
+        return 1
+    try:
+        v = int(raw)
+        return v if v > 0 else 1
+    except Exception:
+        return 1
 
 
 def assert_team_has_capacity(team_id: str, auth: str, max_size: int) -> dict:
